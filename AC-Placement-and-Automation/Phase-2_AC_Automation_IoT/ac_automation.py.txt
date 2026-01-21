@@ -1,0 +1,206 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include "DHT.h"
+
+// ================== USER CONFIG ==================
+const char* WIFI_SSID     = "SmartAC";
+const char* WIFI_PASSWORD = "12345678";
+
+// RM4 server
+const char* RM4_HOST = "10.24.4.202";  // RM4 Python server IP
+const int   RM4_PORT = 5000;
+
+// -------- ZONE 1: BLUESTAR (PIR1) --------
+const char* Z1_ON_PATH        = "/bluestar_on";
+const char* Z1_OFF_PATH       = "/bluestar_off";
+const char* Z1_TEMP_DOWN_PATH = "/bluestar_temp_low";
+const char* Z1_TEMP_UP_PATH   = "/bluestar_temp_up";
+
+// -------- ZONE 2: TATA (PIR2) --------
+const char* Z2_ON_PATH        = "/tata_on";
+const char* Z2_OFF_PATH       = "/tata_off";
+const char* Z2_TEMP_DOWN_PATH = "/tata_temp_low";
+const char* Z2_TEMP_UP_PATH   = "/tata_temp_up";
+
+// -------- PINS --------
+#define PIR1_PIN 26   // Zone 1 - Bluestar
+#define PIR2_PIN 27   // Zone 2 - TATA
+#define DHT_PIN  14   // DHT22 data pin
+#define DHTTYPE  DHT22
+// =================================================
+
+DHT dht(DHT_PIN, DHTTYPE);
+
+// Zone state
+bool zone1ACOn = false;
+bool zone2ACOn = false;
+
+unsigned long zone1LastMotion = 0;
+unsigned long zone2LastMotion = 0;
+const unsigned long OFF_DELAY = 5000;      // 5 seconds no motion -> OFF
+
+// Temperature control
+const float TEMP_THRESHOLD  = 25.0;        // target °C
+const float TEMP_DEADBAND   = 0.5;         // +/- around target
+
+unsigned long lastTempReadTime = 0;
+const unsigned long TEMP_READ_INTERVAL = 10000;   // read DHT22 every 10 sec
+
+// Separate adjust timers per zone (to avoid spamming IR)
+unsigned long zone1LastTempAdjust = 0;
+unsigned long zone2LastTempAdjust = 0;
+const unsigned long TEMP_ADJUST_INTERVAL = 30000; // 30 sec min between changes
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  pinMode(PIR1_PIN, INPUT);
+  pinMode(PIR2_PIN, INPUT);
+  dht.begin();
+
+  Serial.println("Connecting to WiFi...");
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(300);
+    Serial.print(".");
+  }
+  Serial.println("\n WiFi connected!");
+  Serial.print("IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+void loop() {
+  handleZone1PIR();
+  handleZone2PIR();
+  handleTemperatureForZones();
+  delay(50);
+}
+
+// ==================== ZONE 1 (BLUESTAR) PIR LOGIC ====================
+
+void handleZone1PIR() {
+  int pir1 = digitalRead(PIR1_PIN);
+
+  if (pir1 == HIGH) {
+    if (!zone1ACOn) {
+      Serial.println("ZONE 1 (Bluestar): Motion → AC ON");
+      sendRequest(Z1_ON_PATH, "Z1_ON");
+      zone1ACOn = true;
+    }
+    zone1LastMotion = millis();
+  } else {
+    if (zone1ACOn && (millis() - zone1LastMotion > OFF_DELAY)) {
+      Serial.println("ZONE 1: No motion 5s → AC OFF");
+      sendRequest(Z1_OFF_PATH, "Z1_OFF");
+      zone1ACOn = false;
+    }
+  }
+}
+
+// ==================== ZONE 2 (TATA) PIR LOGIC ====================
+
+void handleZone2PIR() {
+  int pir2 = digitalRead(PIR2_PIN);
+
+  if (pir2 == HIGH) {
+    if (!zone2ACOn) {
+      Serial.println(" ZONE 2 (TATA): Motion → AC ON");
+      sendRequest(Z2_ON_PATH, "Z2_ON");
+      zone2ACOn = true;
+    }
+    zone2LastMotion = millis();
+  } else {
+    if (zone2ACOn && (millis() - zone2LastMotion > OFF_DELAY)) {
+      Serial.println("ZONE 2: No motion 5s → AC OFF");
+      sendRequest(Z2_OFF_PATH, "Z2_OFF");
+      zone2ACOn = false;
+    }
+  }
+}
+
+// ==================== SHARED TEMP CONTROL FOR BOTH ZONES ====================
+
+void handleTemperatureForZones() {
+  unsigned long now = millis();
+
+  // Read DHT every TEMP_READ_INTERVAL
+  if (now - lastTempReadTime < TEMP_READ_INTERVAL) return;
+  lastTempReadTime = now;
+
+  float h = dht.readHumidity();
+  float t = dht.readTemperature();
+
+  if (isnan(t) || isnan(h)) {
+    Serial.println("DHT22 read failed");
+    return;
+  }
+
+  Serial.print(" Room Temp: ");
+  Serial.print(t);
+  Serial.print(" °C, Humidity: ");
+  Serial.print(h);
+  Serial.println(" %");
+
+  // ZONE 1 TEMP CONTROL (only if its AC is ON)
+  if (zone1ACOn && (now - zone1LastTempAdjust > TEMP_ADJUST_INTERVAL)) {
+    if (t > TEMP_THRESHOLD + TEMP_DEADBAND) {
+      Serial.println("ZONE 1: Temp high → TEMP DOWN (Bluestar cooler)");
+      sendRequest(Z1_TEMP_DOWN_PATH, "Z1_TEMP_DOWN");
+      zone1LastTempAdjust = now;
+    } else if (t < TEMP_THRESHOLD - TEMP_DEADBAND) {
+      Serial.println("ZONE 1: Temp low → TEMP UP (Bluestar warmer)");
+      sendRequest(Z1_TEMP_UP_PATH, "Z1_TEMP_UP");
+      zone1LastTempAdjust = now;
+    } else {
+      Serial.println("ZONE 1: Temp near target (no change)");
+    }
+  }
+
+  // ZONE 2 TEMP CONTROL (only if its AC is ON)
+  if (zone2ACOn && (now - zone2LastTempAdjust > TEMP_ADJUST_INTERVAL)) {
+    if (t > TEMP_THRESHOLD + TEMP_DEADBAND) {
+      Serial.println("ZONE 2: Temp high → TEMP DOWN (TATA cooler)");
+      sendRequest(Z2_TEMP_DOWN_PATH, "Z2_TEMP_DOWN");
+      zone2LastTempAdjust = now;
+    } else if (t < TEMP_THRESHOLD - TEMP_DEADBAND) {
+      Serial.println("ZONE 2: Temp low → TEMP UP (TATA warmer)");
+      sendRequest(Z2_TEMP_UP_PATH, "Z2_TEMP_UP");
+      zone2LastTempAdjust = now;
+    } else {
+      Serial.println("ZONE 2: Temp near target (no change)");
+    }
+  }
+}
+
+// ==================== HTTP HELPER ====================
+
+void sendRequest(const char* path, const char* tag) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected");
+    return;
+  }
+
+  HTTPClient http;
+  String url = String("http://") + RM4_HOST + ":" + RM4_PORT + path;
+
+  Serial.print("[");
+  Serial.print(tag);
+  Serial.print("] → ");
+  Serial.println(url);
+
+  http.begin(url);
+  int code = http.GET();
+
+  if (code > 0) {
+    Serial.print("HTTP ");
+    Serial.println(code);
+    String payload = http.getString();
+    Serial.println(payload);
+  } else {
+    Serial.print("HTTP error: ");
+    Serial.println(code);
+  }
+
+  http.end();
+}

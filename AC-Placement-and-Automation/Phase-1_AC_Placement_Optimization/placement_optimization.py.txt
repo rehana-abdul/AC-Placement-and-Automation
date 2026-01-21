@@ -1,0 +1,204 @@
+import random
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from matplotlib.patches import Patch
+
+POP_SIZE = 50
+NUM_GENERATIONS = 50
+MUTATION_RATE = 0.1
+
+room_length = int(input("Enter room length (ft): "))
+room_width = int(input("Enter room width (ft): "))
+room_height = int(input("Enter room height (ft): "))
+num_acs = int(input("Enter number of ACs: "))
+
+print(f"\nEnter {num_acs} user AC positions (x y z):")
+user_ac_positions = [tuple(map(int, input(f"AC {i+1} position: ").split())) for i in range(num_acs)]
+
+window_count = int(input("\nEnter number of windows: "))
+window_positions = []
+for i in range(window_count):
+    x, y, z = map(int, input(f"Enter window {i+1} position (x y z): ").split())
+    x = min(max(x, 0), room_length) if x in [0, room_length] else x
+    y = min(max(y, 0), room_width) if y in [0, room_width] else y
+    z = min(max(z, 4), room_height - 1)
+    window_positions.append((x, y, z))
+
+door_count = int(input("\nEnter number of doors: "))
+door_positions = []
+for i in range(door_count):
+    x, y, z = map(int, input(f"Enter door {i+1} position (x y z): ").split())
+    x = min(max(x, 0), room_length) if x in [0, room_length] else x
+    y = min(max(y, 0), room_width) if y in [0, room_width] else y
+    z = 0
+    door_positions.append((x, y, z))
+
+def is_near_structure(ac, structures, min_distance):
+    return any(np.linalg.norm(np.array(ac) - np.array(s)) < min_distance for s in structures)
+
+def wall_penalty(ac):
+    return min(ac[0], room_length - ac[0], ac[1], room_width - ac[1])
+
+def energy_efficiency_score(layout):
+    score = 0
+    for i in range(len(layout)):
+        for j in range(i + 1, len(layout)):
+            score += np.linalg.norm(np.array(layout[i]) - np.array(layout[j]))
+    pairs = len(layout) * (len(layout) - 1) / 2
+    return score / (pairs + 1)
+
+def fitness(layout):
+    score = 100
+    for ac in layout:
+        if is_near_structure(ac, window_positions, 3):
+            score -= 10
+        if is_near_structure(ac, door_positions, 3):
+            score -= 10
+        if wall_penalty(ac) < 2:
+            score -= 5
+
+    
+    for i in range(len(layout)):
+        for j in range(i + 1, len(layout)):
+            dist = np.linalg.norm(np.array(layout[i]) - np.array(layout[j]))
+            if dist < 6:
+                score -= 10 
+            elif dist < 10:
+                score -= 5  
+
+    
+    score -= energy_efficiency_score(layout) * 1.5
+    return max(score, 0)
+
+
+def generate_layout():
+    layout = []
+    z_min = max(5, room_height - 3)
+    for _ in range(num_acs):
+        wall = random.choice(["left", "right", "front", "back"])
+        if wall == "left":
+            x = 0
+            y = random.randint(2, room_width - 3)
+        elif wall == "right":
+            x = room_length
+            y = random.randint(2, room_width - 3)
+        elif wall == "front":
+            y = 0
+            x = random.randint(2, room_length - 3)
+        else:
+            y = room_width
+            x = random.randint(2, room_length - 3)
+        z = random.randint(z_min, room_height - 1)
+        layout.append((x, y, z))
+    return layout
+
+population = [generate_layout() for _ in range(POP_SIZE)]
+
+for gen in range(NUM_GENERATIONS):
+    population.sort(key=fitness, reverse=True)
+    parents = population[:10]
+    next_gen = []
+    for _ in range(POP_SIZE):
+        p1, p2 = random.sample(parents, 2)
+        if num_acs > 1:
+            idx = random.randint(1, num_acs - 1)
+            child = p1[:idx] + p2[idx:]
+        else:
+            child = p1.copy()
+        if random.random() < MUTATION_RATE:
+            idx = random.randint(0, num_acs - 1)
+            layout = generate_layout()
+            child[idx] = layout[idx]
+        next_gen.append(child)
+    population = next_gen
+
+best_layout = max(population, key=fitness)
+
+initial_energy_efficiency = energy_efficiency_score(user_ac_positions)
+optimized_energy_efficiency = energy_efficiency_score(best_layout)
+initial_fitness = fitness(user_ac_positions)
+optimized_fitness = fitness(best_layout)
+
+def draw_room(ax, room_offset_x=0):
+    walls = [
+        [[0, 0, 0], [room_length, 0, 0], [room_length, 0, room_height], [0, 0, room_height]],
+        [[0, room_width, 0], [room_length, room_width, 0], [room_length, room_width, room_height], [0, room_width, room_height]],
+        [[0, 0, 0], [0, room_width, 0], [0, room_width, room_height], [0, 0, room_height]],
+        [[room_length, 0, 0], [room_length, room_width, 0], [room_length, room_width, room_height], [room_length, 0, room_height]],
+        [[0, 0, room_height], [room_length, 0, room_height], [room_length, room_width, room_height], [0, room_width, room_height]],
+    ]
+    offset_walls = [[[x + room_offset_x, y, z] for x, y, z in wall] for wall in walls]
+    ax.add_collection3d(Poly3DCollection(offset_walls, facecolors='whitesmoke', linewidths=1, edgecolors='gray', alpha=0.1))
+
+def draw_flat_panel(ax, x, y, z, w, h, wall, color, room_offset_x=0, label=None):
+    if wall == 'left' or wall == 'right':
+        verts = [[(x + room_offset_x, y - w/2, z - h/2), (x + room_offset_x, y + w/2, z - h/2),
+                  (x + room_offset_x, y + w/2, z + h/2), (x + room_offset_x, y - w/2, z + h/2)]]
+    elif wall == 'front' or wall == 'back':
+        verts = [[(x - w/2 + room_offset_x, y, z - h/2), (x + w/2 + room_offset_x, y, z - h/2),
+                  (x + w/2 + room_offset_x, y, z + h/2), (x - w/2 + room_offset_x, y, z + h/2)]]
+    ax.add_collection3d(Poly3DCollection(verts, facecolors=color, edgecolors='k', linewidths=1))
+    if label:
+        ax.text(x + room_offset_x, y, z + h/2 + 0.5, label, color='black', fontsize=8)
+
+fig = plt.figure(figsize=(18, 8))
+
+ax1 = fig.add_subplot(121, projection='3d')
+ax1.set_box_aspect([room_length, room_width, room_height])
+ax1.set_title("User AC Placement")
+ax1.set_xlim([0, room_length])
+ax1.set_ylim([0, room_width])
+ax1.set_zlim([0, room_height])
+ax1.set_xlabel('Length (ft)')
+ax1.set_ylabel('Width (ft)')
+ax1.set_zlabel('Height (ft)')
+draw_room(ax1)
+for x, y, z in window_positions:
+    wall = 'left' if x == 0 else 'right' if x == room_length else 'front' if y == 0 else 'back'
+    draw_flat_panel(ax1, x, y, z, 2, 2, wall, 'blue')
+for x, y, z in door_positions:
+    wall = 'left' if x == 0 else 'right' if x == room_length else 'front' if y == 0 else 'back'
+    draw_flat_panel(ax1, x, y, z + 1.5, 2, 3, wall, 'red')
+for idx, (x, y, z) in enumerate(user_ac_positions):
+    wall = 'left' if x == 0 else 'right' if x == room_length else 'front' if y == 0 else 'back'
+    draw_flat_panel(ax1, x, y, z, 2.7, 1.2, wall, 'yellow', label=f"AC {idx+1}")
+
+ax2 = fig.add_subplot(122, projection='3d')
+ax2.set_box_aspect([room_length, room_width, room_height])
+ax2.set_title("Optimized AC Placement")
+ax2.set_xlim([0, room_length])
+ax2.set_ylim([0, room_width])
+ax2.set_zlim([0, room_height])
+ax2.set_xlabel('Length (ft)')
+ax2.set_ylabel('Width (ft)')
+ax2.set_zlabel('Height (ft)')
+draw_room(ax2)
+for x, y, z in window_positions:
+    wall = 'left' if x == 0 else 'right' if x == room_length else 'front' if y == 0 else 'back'
+    draw_flat_panel(ax2, x, y, z, 2, 2, wall, 'blue')
+for x, y, z in door_positions:
+    wall = 'left' if x == 0 else 'right' if x == room_length else 'front' if y == 0 else 'back'
+    draw_flat_panel(ax2, x, y, z + 1.5, 2, 3, wall, 'red')
+for idx, (x, y, z) in enumerate(best_layout):
+    wall = 'left' if x == 0 else 'right' if x == room_length else 'front' if y == 0 else 'back'
+    draw_flat_panel(ax2, x, y, z, 2.7, 1.2, wall, 'green', label=f"AC {idx+1}")
+
+legend_elements = [
+    Patch(facecolor='yellow', edgecolor='black', label='User AC'),
+    Patch(facecolor='green', edgecolor='black', label='Optimized AC'),
+    Patch(facecolor='blue', edgecolor='black', label='Window'),
+    Patch(facecolor='red', edgecolor='black', label='Door')
+]
+ax1.legend(handles=legend_elements)
+
+plt.tight_layout()
+plt.show()
+
+print(f"\nInitial Energy Efficiency: {initial_energy_efficiency:.2f}")
+print(f"Initial Fitness Score: {initial_fitness:.2f}")
+print(f"\nOptimized Energy Efficiency: {optimized_energy_efficiency:.2f}")
+print(f"Optimized Fitness Score: {optimized_fitness:.2f}")
+print("\nOptimized AC Positions:")
+for i, (x, y, z) in enumerate(best_layout):
+    print(f"AC {i+1}: ({x}, {y}, {z})")
